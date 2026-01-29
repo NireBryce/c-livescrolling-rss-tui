@@ -86,4 +86,4 @@ man doc/livescroll-rss.1
 
 ## License
 
-See [LICENSE](LICENSE) for details.
+No license has been specified yet.  See the repository for updates.

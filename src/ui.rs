@@ -92,7 +92,7 @@ fn draw_status_bar(app: &App, frame: &mut Frame, area: Rect) {
             format!("{} items", app.items.len()),
             Style::default().fg(Color::Green),
         ),
-        Span::raw("  q: quit  ↑/↓: scroll  Home/End: jump"),
+        Span::raw("  q: quit  ↑↓/jk: scroll  Home/End/gG: jump"),
     ]));
     frame.render_widget(status, area);
 }
