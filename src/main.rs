@@ -1,16 +1,40 @@
-mod app;
-mod source;
+//! livescroll-rss — a live-updating RSS feed reader for the terminal.
+//!
+//! ## Architecture overview
+//!
+//! ```text
+//! ┌──────────┐  PollMsg   ┌──────────┐  draw()  ┌──────────┐
+//! │  poll.rs │ ─────────► │  app.rs  │ ───────► │  ui.rs   │
+//! │ (thread) │  (channel) │ (state)  │          │ (render) │
+//! └──────────┘            └──────────┘          └──────────┘
+//!                              ▲
+//!                              │ handle_key_event()
+//!                         ┌──────────┐
+//!                         │ input.rs │
+//!                         └──────────┘
+//! ```
+//!
+//! * **`source/`** — the `DataSource` trait and concrete implementations
+//!   (currently RSS only).
+//! * **`poll`** — spawns a background thread that fetches sources on a timer.
+//! * **`app`** — owns all application state (items, scroll position, etc.).
+//! * **`ui`** — pure rendering: reads `App` state and draws widgets.
+//! * **`input`** — maps key events to `App` mutations.
+//! * **`main`** — wires everything together: parse args, set up the terminal,
+//!   and run the event loop.
 
-use std::{
-    io,
-    sync::mpsc,
-    thread,
-    time::Duration,
-};
+mod app;
+mod input;
+mod poll;
+mod source;
+mod ui;
+
+use std::io;
+use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -18,41 +42,25 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use app::App;
-use source::{DataSource, FeedItem, RssSource};
-
-/// Messages sent from the poller thread to the UI thread.
-enum PollMsg {
-    Items(Vec<FeedItem>),
-    Error(String),
-}
+use poll::PollMsg;
+use source::{DataSource, RssSource};
 
 fn main() -> Result<()> {
+    // -- parse arguments -----------------------------------------------------
     let url = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "https://feeds.bbci.co.uk/news/rss.xml".into());
 
-    // --- set up data sources ------------------------------------------------
+    // -- configure data sources ----------------------------------------------
+    // To add more feeds, push additional sources here.
     let sources: Vec<Box<dyn DataSource>> = vec![
         Box::new(RssSource::new(&url, "RSS")),
     ];
 
-    // --- background polling -------------------------------------------------
-    let (tx, rx) = mpsc::channel::<PollMsg>();
-    let poll_interval = Duration::from_secs(60);
+    // -- start background polling --------------------------------------------
+    let rx = poll::spawn(sources);
 
-    thread::spawn(move || {
-        loop {
-            for src in &sources {
-                match src.fetch() {
-                    Ok(items) => { let _ = tx.send(PollMsg::Items(items)); }
-                    Err(e) => { let _ = tx.send(PollMsg::Error(format!("{}: {e}", src.name()))); }
-                }
-            }
-            thread::sleep(poll_interval);
-        }
-    });
-
-    // --- terminal setup -----------------------------------------------------
+    // -- terminal setup ------------------------------------------------------
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -61,11 +69,15 @@ fn main() -> Result<()> {
 
     let mut app = App::new();
 
-    // --- main loop ----------------------------------------------------------
+    // -- main event loop -----------------------------------------------------
+    // Runs at ~10 fps (100 ms tick).  Each iteration:
+    //   1. Drain any messages from the poller.
+    //   2. Render the UI.
+    //   3. Poll for keyboard input (non-blocking, up to tick_rate).
     let tick_rate = Duration::from_millis(100);
 
     loop {
-        // drain all pending messages from poller
+        // 1. Process poll messages
         while let Ok(msg) = rx.try_recv() {
             match msg {
                 PollMsg::Items(items) => {
@@ -79,23 +91,13 @@ fn main() -> Result<()> {
             }
         }
 
-        terminal.draw(|f| app.draw(f))?;
+        // 2. Render
+        terminal.draw(|f| ui::draw(&mut app, f))?;
 
+        // 3. Handle input
         if event::poll(tick_rate)? {
             if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => {
-                        app.quit = true;
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => app.select_next(),
-                    KeyCode::Up | KeyCode::Char('k') => app.select_previous(),
-                    KeyCode::Home | KeyCode::Char('g') => app.select_first(),
-                    KeyCode::End | KeyCode::Char('G') => app.select_last(),
-                    _ => {}
-                }
+                input::handle_key_event(&mut app, key);
             }
         }
 
@@ -104,7 +106,7 @@ fn main() -> Result<()> {
         }
     }
 
-    // --- teardown -----------------------------------------------------------
+    // -- teardown ------------------------------------------------------------
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;

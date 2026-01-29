@@ -1,82 +1,68 @@
+//! RSS feed source implementation.
+//!
+//! This module shows how to implement the [`DataSource`] trait for a concrete
+//! feed format.  Use it as a template when adding support for Atom, JSON Feed,
+//! or any other format.
+//!
+//! ## For contributors — adding a new source type
+//!
+//! 1. Create a new file under `src/source/` (e.g. `atom.rs`).
+//! 2. Define a struct that holds any configuration your source needs (URL,
+//!    API key, etc.).
+//! 3. Implement [`DataSource`] for your struct — `name()` returns a label and
+//!    `fetch()` returns `Vec<FeedItem>`.
+//! 4. Re-export your struct from `src/source/mod.rs`.
+//! 5. Wire it into the source list in `main.rs`.
+//!
+//! The RSS implementation below is a complete worked example.
+
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use std::cmp::Ordering;
 
-/// A single item from any data source.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct FeedItem {
-    /// Unique identifier (e.g. RSS guid or URL).
-    pub id: String,
-    /// Display title.
-    pub title: String,
-    /// Optional longer description / summary.
-    pub description: Option<String>,
-    /// Link to the full content.
-    pub link: Option<String>,
-    /// Publication timestamp (used for sorting).
-    pub published: Option<DateTime<Utc>>,
-    /// Name of the source / feed this came from.
-    pub source_name: String,
-}
+use super::{DataSource, FeedItem};
 
-impl Ord for FeedItem {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse chronological: newer items first.
-        other.published.cmp(&self.published)
-    }
-}
-
-impl PartialOrd for FeedItem {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-/// Trait that any data source must implement.
+/// An RSS feed data source.
 ///
-/// To add a new source (Atom, JSON feed, API, etc.) just implement this trait
-/// and wire it into the polling loop.
-pub trait DataSource: Send {
-    /// Human-readable name for this source.
-    fn name(&self) -> &str;
-
-    /// Fetch the latest batch of items.  The implementation should do its own
-    /// HTTP / IO work and return parsed items.
-    fn fetch(&self) -> Result<Vec<FeedItem>>;
-}
-
-// ---------------------------------------------------------------------------
-// RSS implementation
-// ---------------------------------------------------------------------------
-
+/// Fetches and parses an RSS 2.0 feed over HTTP using the [`rss`] crate.
 pub struct RssSource {
+    /// The feed URL to poll.
     pub url: String,
+    /// A human-readable label shown in the UI next to each item.
     pub label: String,
 }
 
 impl RssSource {
+    /// Create a new RSS source.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` — full URL of the RSS feed (e.g.
+    ///   `https://feeds.bbci.co.uk/news/rss.xml`).
+    /// * `label` — short name displayed in the TUI for items from this feed.
     pub fn new(url: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
             url: url.into(),
             label: label.into(),
         }
     }
-}
 
-impl RssSource {
-    /// Parse an RSS channel into `FeedItem`s.  Extracted so tests can call it
-    /// without hitting the network.
+    /// Parse an already-fetched [`rss::Channel`] into [`FeedItem`]s.
+    ///
+    /// This is a pure function (no I/O) so that tests can exercise the
+    /// parsing logic without hitting the network.
     pub fn parse_channel(channel: &rss::Channel, label: &str) -> Vec<FeedItem> {
         channel
             .items()
             .iter()
             .map(|item| {
+                // Prefer <guid>, fall back to <link>, then empty string.
                 let id = item
                     .guid()
                     .map(|g| g.value().to_string())
                     .or_else(|| item.link().map(String::from))
                     .unwrap_or_default();
 
+                // Parse RFC-2822 date; gracefully degrade to None on failure.
                 let published = item
                     .pub_date()
                     .and_then(|d| DateTime::parse_from_rfc2822(d).ok())
@@ -107,60 +93,13 @@ impl DataSource for RssSource {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
-
-    /// Helper to build a FeedItem with minimal boilerplate.
-    pub fn make_item(id: &str, title: &str, published: Option<DateTime<Utc>>) -> FeedItem {
-        FeedItem {
-            id: id.to_string(),
-            title: title.to_string(),
-            description: None,
-            link: None,
-            published,
-            source_name: "test".to_string(),
-        }
-    }
-
-    // -- FeedItem ordering ---------------------------------------------------
-
-    #[test]
-    fn feed_items_sort_reverse_chronological() {
-        let old = make_item("1", "Old", Some(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap()));
-        let mid = make_item("2", "Mid", Some(Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap()));
-        let new = make_item("3", "New", Some(Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()));
-
-        let mut items = vec![old.clone(), new.clone(), mid.clone()];
-        items.sort();
-
-        assert_eq!(items[0].id, "3", "newest first");
-        assert_eq!(items[1].id, "2");
-        assert_eq!(items[2].id, "1", "oldest last");
-    }
-
-    #[test]
-    fn items_without_date_sort_after_dated_items() {
-        let dated = make_item("1", "Dated", Some(Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap()));
-        let undated = make_item("2", "Undated", None);
-
-        let mut items = vec![undated.clone(), dated.clone()];
-        items.sort();
-
-        assert_eq!(items[0].id, "1", "dated item should come first");
-        assert_eq!(items[1].id, "2", "undated item should come last");
-    }
-
-    #[test]
-    fn items_with_same_date_are_equal_ordering() {
-        let ts = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
-        let a = make_item("a", "A", Some(ts));
-        let b = make_item("b", "B", Some(ts));
-        assert_eq!(a.cmp(&b), Ordering::Equal);
-    }
-
-    // -- RSS XML parsing -----------------------------------------------------
 
     #[test]
     fn parse_channel_extracts_items() {
@@ -202,7 +141,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_channel_falls_back_to_link_for_id() {
+    fn falls_back_to_link_when_no_guid() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
   <channel>
@@ -221,7 +160,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_channel_handles_missing_title() {
+    fn handles_missing_title() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
   <channel>
@@ -239,7 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_channel_handles_invalid_date() {
+    fn handles_invalid_date() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
   <channel>
@@ -258,10 +197,8 @@ mod tests {
         assert!(items[0].published.is_none());
     }
 
-    // -- DataSource trait on RssSource ---------------------------------------
-
     #[test]
-    fn rss_source_name_returns_label() {
+    fn name_returns_label() {
         let src = RssSource::new("http://example.com/feed", "My Feed");
         assert_eq!(src.name(), "My Feed");
     }
