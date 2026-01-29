@@ -88,7 +88,7 @@ impl DataSource for RssSource {
 
     fn fetch(&self) -> Result<Vec<FeedItem>> {
         let body = reqwest::blocking::get(&self.url)?.bytes()?;
-        let channel = rss::Channel::read_from(&body[..])?;
+        let channel = rss::Channel::read_from(body.as_ref())?;
         Ok(Self::parse_channel(&channel, &self.label))
     }
 }

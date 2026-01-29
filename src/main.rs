@@ -45,7 +45,58 @@ use app::App;
 use poll::PollMsg;
 use source::{DataSource, RssSource};
 
+// ---------------------------------------------------------------------------
+// RAII terminal guard — idiomatic cleanup even on panic
+// ---------------------------------------------------------------------------
+
+/// Manages terminal raw-mode and alternate-screen lifetime via [`Drop`].
+///
+/// Constructing this struct enters raw mode + alternate screen.  When the
+/// value is dropped (normally or during stack unwinding) it restores the
+/// terminal.  This prevents the common TUI bug where a panic leaves the
+/// terminal in a broken state.
+struct TerminalGuard {
+    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+}
+
+impl TerminalGuard {
+    fn new() -> Result<Self> {
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen)?;
+        let backend = CrosstermBackend::new(stdout);
+        let terminal = Terminal::new(backend)?;
+        Ok(Self { terminal })
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = self.terminal.show_cursor();
+    }
+}
+
+/// Install a panic hook that restores the terminal before printing the
+/// panic message.  Without this, a panic inside the event loop would leave
+/// raw mode enabled and the alternate screen active.
+fn install_panic_hook() {
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        original_hook(info);
+    }));
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
 fn main() -> Result<()> {
+    install_panic_hook();
+
     // -- parse arguments -----------------------------------------------------
     let url = std::env::args()
         .nth(1)
@@ -60,13 +111,8 @@ fn main() -> Result<()> {
     // -- start background polling --------------------------------------------
     let rx = poll::spawn(sources);
 
-    // -- terminal setup ------------------------------------------------------
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
+    // -- terminal setup (RAII — Drop restores on exit or panic) --------------
+    let mut guard = TerminalGuard::new()?;
     let mut app = App::new();
 
     // -- main event loop -----------------------------------------------------
@@ -92,7 +138,7 @@ fn main() -> Result<()> {
         }
 
         // 2. Render
-        terminal.draw(|f| ui::draw(&mut app, f))?;
+        guard.terminal.draw(|f| ui::draw(&mut app, f))?;
 
         // 3. Handle input
         if event::poll(tick_rate)? {
@@ -106,10 +152,6 @@ fn main() -> Result<()> {
         }
     }
 
-    // -- teardown ------------------------------------------------------------
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
+    // `guard` is dropped here, restoring the terminal.
     Ok(())
 }

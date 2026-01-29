@@ -40,9 +40,8 @@ pub struct App {
     pub status: String,
 }
 
-impl App {
-    /// Create a new, empty application state.
-    pub fn new() -> Self {
+impl Default for App {
+    fn default() -> Self {
         Self {
             items: Vec::new(),
             seen: HashSet::new(),
@@ -50,6 +49,13 @@ impl App {
             quit: false,
             status: "Starting\u{2026}".into(), // "Starting…"
         }
+    }
+}
+
+impl App {
+    /// Create a new, empty application state.
+    pub fn new() -> Self {
+        Self::default()
     }
 
     // -- feed management -----------------------------------------------------
@@ -59,13 +65,18 @@ impl App {
     /// * Duplicates (by `id`) are silently skipped.
     /// * The list is re-sorted after insertion so that the newest item is
     ///   always at index 0.
-    pub fn merge_items(&mut self, new_items: Vec<FeedItem>) {
+    ///
+    /// Accepts any iterator of `FeedItem`s — callers can pass a `Vec`, a
+    /// slice, a `drain(..)`, etc.
+    pub fn merge_items(&mut self, new_items: impl IntoIterator<Item = FeedItem>) {
         for item in new_items {
             if self.seen.insert(item.id.clone()) {
                 self.items.push(item);
             }
         }
-        self.items.sort(); // reverse-chronological via FeedItem's Ord impl
+        // `sort_unstable` is preferred when equal elements have no meaningful
+        // relative order — it avoids an allocation and is faster.
+        self.items.sort_unstable();
     }
 
     // -- list navigation -----------------------------------------------------
@@ -75,10 +86,10 @@ impl App {
         if self.items.is_empty() {
             return;
         }
-        let i = match self.list_state.selected() {
-            Some(i) => (i + 1).min(self.items.len() - 1),
-            None => 0,
-        };
+        let i = self
+            .list_state
+            .selected()
+            .map_or(0, |i| (i + 1).min(self.items.len() - 1));
         self.list_state.select(Some(i));
     }
 
@@ -87,10 +98,10 @@ impl App {
         if self.items.is_empty() {
             return;
         }
-        let i = match self.list_state.selected() {
-            Some(i) => i.saturating_sub(1),
-            None => 0,
-        };
+        let i = self
+            .list_state
+            .selected()
+            .map_or(0, |i| i.saturating_sub(1));
         self.list_state.select(Some(i));
     }
 
