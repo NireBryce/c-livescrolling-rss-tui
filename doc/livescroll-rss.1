@@ -1,0 +1,81 @@
+.TH LIVESCROLL-RSS 1 "2025-01-29" "livescroll-rss 0.1.0" "User Commands"
+.SH NAME
+livescroll-rss \- live-updating RSS feed reader for the terminal
+.SH SYNOPSIS
+.B livescroll-rss
+.RI [ FEED_URL ]
+.SH DESCRIPTION
+.B livescroll-rss
+polls an RSS feed and displays a live-updating, reverse-chronological
+list of items in a terminal user interface.
+.PP
+A background thread fetches the feed every 60 seconds.  New items are
+de-duplicated by GUID (or link) and merged into a sorted list with the
+newest items at the top.
+.SH ARGUMENTS
+.TP
+.I FEED_URL
+URL of an RSS\ 2.0 feed to poll.
+If omitted, defaults to the BBC News feed
+.RI ( https://feeds.bbci.co.uk/news/rss.xml ).
+.SH KEYBINDINGS
+.TP
+.BR q ", " Esc
+Quit the application.
+.TP
+.BR \(ua " / " k
+Scroll the selection up by one item.
+.TP
+.BR \(da " / " j
+Scroll the selection down by one item.
+.TP
+.BR Home " / " g
+Jump to the first (newest) item.
+.TP
+.BR End " / " G
+Jump to the last (oldest) item.
+.SH DISPLAY
+The main area shows a scrollable list of feed items.  Each row contains:
+.PP
+.RS
+.I DATE\  TIME\  \  TITLE\  \  [SOURCE]
+.RE
+.PP
+The bottom line shows:
+.IP \(bu 2
+The last poll status (e.g. "Fetched 42 items" or an error message)
+.IP \(bu
+The total number of items
+.IP \(bu
+A keybinding reminder
+.SH EXIT STATUS
+.TP
+.B 0
+Normal exit (user pressed
+.B q
+or
+.BR Esc ).
+.TP
+.B >0
+An error occurred during startup (e.g. terminal setup failure).
+.SH EXAMPLES
+Watch BBC News (default feed):
+.PP
+.RS
+.B livescroll-rss
+.RE
+.PP
+Watch Hacker News front page:
+.PP
+.RS
+.B livescroll-rss https://hnrss.org/frontpage
+.RE
+.SH ENVIRONMENT
+.B livescroll-rss
+respects the standard terminal environment.  It requires a terminal that
+supports ANSI escape sequences and alternate screen mode.
+.SH SEE ALSO
+.BR rss2email (1),
+.BR newsboat (1)
+.SH AUTHORS
+See the project repository for the full list of contributors.

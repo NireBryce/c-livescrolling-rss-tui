@@ -2,6 +2,11 @@
 name = "livescroll-rss"
 version = "0.1.0"
 edition = "2021"
+description = "A terminal UI that polls RSS feeds and displays a live-updating, reverse-chronological list of items"
+repository = "https://github.com/NireBryce/c-livescrolling-rss-tui"
+readme = "README.md"
+keywords = ["rss", "tui", "terminal", "feed"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1"

@@ -1,52 +1,76 @@
-use std::collections::HashMap;
+//! Application state.
+//!
+//! [`App`] owns the feed item list, de-duplication set, scroll position, and
+//! status message.  It is the single source of truth that the UI reads from
+//! and that input / polling code writes to.
+//!
+//! ## For contributors
+//!
+//! * **State only** — this module has no I/O, no rendering, and no
+//!   input handling.  Those live in [`crate::ui`], [`crate::input`], and
+//!   [`crate::poll`] respectively.
+//! * All public methods are covered by the test suite at the bottom of
+//!   this file.  Please add tests for any new behaviour.
 
-use ratatui::{
-    layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
-    Frame,
-};
+use std::collections::HashSet;
+
+use ratatui::widgets::ListState;
 
 use crate::source::FeedItem;
 
+/// Core application state.
+///
+/// Created once in `main()` and passed by mutable reference to the input
+/// handler, poll-message processor, and UI renderer each tick.
 pub struct App {
-    /// De-duplicated, reverse-chronological items.
+    /// De-duplicated feed items in reverse-chronological order (newest first).
     pub items: Vec<FeedItem>,
-    /// Fast lookup to avoid inserting duplicates.
-    seen: HashMap<String, ()>,
-    /// List selection state for scrolling.
+
+    /// Set of item IDs we have already seen, used for O(1) de-duplication.
+    seen: HashSet<String>,
+
+    /// Ratatui list widget selection state (tracks the highlighted row).
     pub list_state: ListState,
-    /// Whether the user has requested to quit.
+
+    /// Set to `true` when the user requests quit; checked by the main loop.
     pub quit: bool,
-    /// Last poll status message.
+
+    /// Human-readable status message shown in the bottom bar
+    /// (e.g. "Fetched 42 items" or "Error: timeout").
     pub status: String,
 }
 
 impl App {
+    /// Create a new, empty application state.
     pub fn new() -> Self {
         Self {
             items: Vec::new(),
-            seen: HashMap::new(),
+            seen: HashSet::new(),
             list_state: ListState::default(),
             quit: false,
-            status: "Starting…".into(),
+            status: "Starting\u{2026}".into(), // "Starting…"
         }
     }
 
-    /// Merge newly-fetched items, de-duplicate, and re-sort.
+    // -- feed management -----------------------------------------------------
+
+    /// Merge newly-fetched items into the list.
+    ///
+    /// * Duplicates (by `id`) are silently skipped.
+    /// * The list is re-sorted after insertion so that the newest item is
+    ///   always at index 0.
     pub fn merge_items(&mut self, new_items: Vec<FeedItem>) {
         for item in new_items {
-            if !self.seen.contains_key(&item.id) {
-                self.seen.insert(item.id.clone(), ());
+            if self.seen.insert(item.id.clone()) {
                 self.items.push(item);
             }
         }
-        self.items.sort(); // uses Ord impl (reverse-chronological)
+        self.items.sort(); // reverse-chronological via FeedItem's Ord impl
     }
 
-    // -- navigation ----------------------------------------------------------
+    // -- list navigation -----------------------------------------------------
 
+    /// Move the selection cursor down by one row.
     pub fn select_next(&mut self) {
         if self.items.is_empty() {
             return;
@@ -58,6 +82,7 @@ impl App {
         self.list_state.select(Some(i));
     }
 
+    /// Move the selection cursor up by one row.
     pub fn select_previous(&mut self) {
         if self.items.is_empty() {
             return;
@@ -69,95 +94,24 @@ impl App {
         self.list_state.select(Some(i));
     }
 
+    /// Jump the selection cursor to the first item.
     pub fn select_first(&mut self) {
         if !self.items.is_empty() {
             self.list_state.select(Some(0));
         }
     }
 
+    /// Jump the selection cursor to the last item.
     pub fn select_last(&mut self) {
         if !self.items.is_empty() {
             self.list_state.select(Some(self.items.len() - 1));
         }
     }
-
-    // -- rendering -----------------------------------------------------------
-
-    pub fn draw(&mut self, frame: &mut Frame) {
-        let [main_area, status_area] = Layout::vertical([
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .areas(frame.area());
-
-        self.draw_list(frame, main_area);
-        self.draw_status(frame, status_area);
-    }
-
-    fn draw_list(&mut self, frame: &mut Frame, area: Rect) {
-        let list_items: Vec<ListItem> = self
-            .items
-            .iter()
-            .map(|item| {
-                let date_str = item
-                    .published
-                    .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
-                    .unwrap_or_else(|| "no date".into());
-
-                let line = Line::from(vec![
-                    Span::styled(
-                        format!("{:<18}", date_str),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(
-                        &item.title,
-                        Style::default().fg(Color::White),
-                    ),
-                    Span::raw("  "),
-                    Span::styled(
-                        format!("[{}]", item.source_name),
-                        Style::default().fg(Color::Cyan),
-                    ),
-                ]);
-
-                ListItem::new(line)
-            })
-            .collect();
-
-        let list = List::new(list_items)
-            .block(
-                Block::default()
-                    .title(" RSS Feed ")
-                    .borders(Borders::ALL),
-            )
-            .highlight_style(
-                Style::default()
-                    .add_modifier(Modifier::BOLD)
-                    .bg(Color::DarkGray),
-            )
-            .highlight_symbol("▸ ");
-
-        frame.render_stateful_widget(list, area, &mut self.list_state);
-    }
-
-    fn draw_status(&self, frame: &mut Frame, area: Rect) {
-        let status = Paragraph::new(Line::from(vec![
-            Span::styled(" ", Style::default()),
-            Span::styled(
-                &self.status,
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                format!("{} items", self.items.len()),
-                Style::default().fg(Color::Green),
-            ),
-            Span::raw("  q: quit  ↑/↓: scroll  Home/End: jump"),
-        ]));
-        frame.render_widget(status, area);
-    }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -198,7 +152,7 @@ mod tests {
     // -- merge_items ---------------------------------------------------------
 
     #[test]
-    fn merge_items_inserts_and_sorts_reverse_chronological() {
+    fn merge_inserts_and_sorts_reverse_chronological() {
         let mut app = App::new();
         app.merge_items(sample_items());
 
@@ -209,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_items_deduplicates_by_id() {
+    fn merge_deduplicates_by_id() {
         let mut app = App::new();
         app.merge_items(vec![
             make_item("dup", "First", Some(Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap())),
@@ -220,20 +174,19 @@ mod tests {
         ]);
 
         assert_eq!(app.items.len(), 2);
-        // The original "First" title is kept, not overwritten.
         assert!(app.items.iter().any(|i| i.id == "dup" && i.title == "First"));
         assert!(app.items.iter().any(|i| i.id == "new"));
     }
 
     #[test]
-    fn merge_items_handles_empty_input() {
+    fn merge_handles_empty_input() {
         let mut app = App::new();
         app.merge_items(vec![]);
         assert!(app.items.is_empty());
     }
 
     #[test]
-    fn merge_items_preserves_existing_on_second_call() {
+    fn merge_preserves_existing_on_second_call() {
         let mut app = App::new();
         app.merge_items(vec![make_item("a", "A", None)]);
         app.merge_items(vec![make_item("b", "B", None)]);
@@ -277,10 +230,8 @@ mod tests {
 
         app.select_next();
         assert_eq!(app.list_state.selected(), Some(0));
-
         app.select_next();
         assert_eq!(app.list_state.selected(), Some(1));
-
         app.select_next();
         assert_eq!(app.list_state.selected(), Some(2));
     }
@@ -289,7 +240,6 @@ mod tests {
     fn select_next_clamps_at_last_item() {
         let mut app = App::new();
         app.merge_items(sample_items());
-
         app.select_last();
         app.select_next();
         assert_eq!(app.list_state.selected(), Some(2));
@@ -299,7 +249,6 @@ mod tests {
     fn select_previous_clamps_at_zero() {
         let mut app = App::new();
         app.merge_items(sample_items());
-
         app.select_first();
         app.select_previous();
         assert_eq!(app.list_state.selected(), Some(0));
@@ -309,8 +258,7 @@ mod tests {
     fn select_previous_moves_up() {
         let mut app = App::new();
         app.merge_items(sample_items());
-
-        app.select_last(); // index 2
+        app.select_last();
         app.select_previous();
         assert_eq!(app.list_state.selected(), Some(1));
     }
@@ -319,7 +267,6 @@ mod tests {
     fn select_first_jumps_to_zero() {
         let mut app = App::new();
         app.merge_items(sample_items());
-
         app.select_last();
         app.select_first();
         assert_eq!(app.list_state.selected(), Some(0));
@@ -329,7 +276,6 @@ mod tests {
     fn select_last_jumps_to_end() {
         let mut app = App::new();
         app.merge_items(sample_items());
-
         app.select_last();
         assert_eq!(app.list_state.selected(), Some(2));
     }
@@ -341,7 +287,7 @@ mod tests {
         let mut app = App::new();
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| app.draw(f)).unwrap();
+        terminal.draw(|f| crate::ui::draw(&mut app, f)).unwrap();
     }
 
     #[test]
@@ -352,7 +298,7 @@ mod tests {
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| app.draw(f)).unwrap();
+        terminal.draw(|f| crate::ui::draw(&mut app, f)).unwrap();
     }
 
     #[test]
@@ -363,7 +309,7 @@ mod tests {
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| app.draw(f)).unwrap();
+        terminal.draw(|f| crate::ui::draw(&mut app, f)).unwrap();
 
         let buf = terminal.backend().buffer().clone();
         let text: String = buf.content().iter().map(|c| c.symbol().chars().next().unwrap_or(' ')).collect();
