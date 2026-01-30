@@ -106,7 +106,8 @@ a three-way layout split and add a new helper function.
 
 ## Testing
 
-The project has unit tests in every module.  Tests use:
+The project has unit tests in the core modules (`app`, `source/feed_item`,
+`source/rss`).  Tests use:
 
 - `make_item()` helpers for building `FeedItem` values without boilerplate
 - `ratatui::backend::TestBackend` for rendering smoke tests
